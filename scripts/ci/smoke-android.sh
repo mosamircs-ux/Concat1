@@ -67,7 +67,7 @@ out=smoke-android
 wait_secs=45
 ready=""
 install=1
-package=app.concat.editor
+package=com.mosamircs.videoeditor
 export_clip=""
 wait_given=""
 
