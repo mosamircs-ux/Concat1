@@ -338,12 +338,37 @@ jobs:
       - name: Stage
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           set -euo pipefail
-          mkdir stage
+          mkdir -p stage
           apk=$(ls src/target/release/apk/*.apk | head -1)
           cp "$apk" "stage/VideoEditor-$VERSION-android-${{ matrix.abi }}.apk"
           cp "$apk" "stage/Concat-$VERSION-android-${{ matrix.abi }}.apk"
+          if [ "${{ matrix.ship }}" = "true" ]; then
+            aab="stage/VideoEditor-$VERSION-android-${{ matrix.abi }}.aab"
+            bash scripts/apk-to-aab.sh "$apk" "$aab"
+            if [ -n "$KEYSTORE_B64" ]; then
+              ks=$RUNNER_TEMP/aab-release.keystore
+              echo "$KEYSTORE_B64" | base64 --decode > "$ks"
+              alias=$KEY_ALIAS
+              if [ -z "$alias" ]; then
+                alias=$(keytool -list -keystore "$ks" -storepass:env KEYSTORE_PASSWORD 2>/dev/null \
+                  | awk -F, '/PrivateKeyEntry/ { print $1; exit }')
+              fi
+              jarsigner -sigalg SHA256withRSA -digestalg SHA-256 \
+                -keystore "$ks" -storepass:env KEYSTORE_PASSWORD -keypass:env KEY_PASSWORD \
+                "$aab" "$alias"
+              rm -f "$ks"
+            else
+              jarsigner -sigalg SHA256withRSA -digestalg SHA-256 \
+                -keystore "$CARGO_APK_RELEASE_KEYSTORE" -storepass:env CARGO_APK_RELEASE_KEYSTORE_PASSWORD \
+                "$aab" concat
+            fi
+          fi
           ls -l stage
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
