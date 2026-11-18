@@ -90,8 +90,16 @@ public class ConcatFiles extends Fragment {
         if (folder == null) {
             return new String[] {null, "this phone has no media store to put it in"};
         }
-        return publish(activity, path, "video/mp4", folder,
+        String[] result = publish(activity, path, "video/mp4", folder,
                 MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY));
+        if (result != null && result.length > 0 && result[0] != null) {
+            try {
+                activity.getClass().getMethod("onVideoExported").invoke(activity);
+            } catch (Throwable ignored) {
+                // Plain NativeActivity builds (e.g. cargo-apk smoke run) do not expose onVideoExported.
+            }
+        }
+        return result;
     }
 
     /**

@@ -335,6 +335,9 @@ jobs:
           fi
 
       # Named by version and target, as the desktop bundles are.
+      # Packages the stripped native engine libraries into the android-playstore
+      # Gradle shell (real Google Mobile Ads SDK + UMP consent + VideoEditorActivity)
+      # to produce a Play Store-compliant signed .aab and .apk.
       - name: Stage
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -342,34 +345,68 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ADMOB_APP_ID: ${{ secrets.ADMOB_APP_ID }}
+          ADMOB_BANNER_ID: ${{ secrets.ADMOB_BANNER_ID }}
+          ADMOB_INTERSTITIAL_ID: ${{ secrets.ADMOB_INTERSTITIAL_ID }}
         run: |
           set -euo pipefail
           mkdir -p stage
           apk=$(ls src/target/release/apk/*.apk | head -1)
-          cp "$apk" "stage/VideoEditor-$VERSION-android-${{ matrix.abi }}.apk"
+          # Keep the plain cargo-apk build for CI smoke tests
           cp "$apk" "stage/Concat-$VERSION-android-${{ matrix.abi }}.apk"
-          if [ "${{ matrix.ship }}" = "true" ]; then
-            aab="stage/VideoEditor-$VERSION-android-${{ matrix.abi }}.aab"
-            bash scripts/apk-to-aab.sh "$apk" "$aab"
-            if [ -n "$KEYSTORE_B64" ]; then
-              ks=$RUNNER_TEMP/aab-release.keystore
-              echo "$KEYSTORE_B64" | base64 --decode > "$ks"
-              alias=$KEY_ALIAS
-              if [ -z "$alias" ]; then
-                alias=$(keytool -list -keystore "$ks" -storepass:env KEYSTORE_PASSWORD 2>/dev/null \
-                  | awk -F, '/PrivateKeyEntry/ { print $1; exit }')
-              fi
-              jarsigner -sigalg SHA256withRSA -digestalg SHA-256 \
-                -keystore "$ks" -storepass:env KEYSTORE_PASSWORD -keypass:env KEY_PASSWORD \
-                "$aab" "$alias"
-              rm -f "$ks"
-            else
-              jarsigner -sigalg SHA256withRSA -digestalg SHA-256 \
-                -keystore "$CARGO_APK_RELEASE_KEYSTORE" -storepass:env CARGO_APK_RELEASE_KEYSTORE_PASSWORD \
-                "$aab" concat
-            fi
+
+          android_abi="arm64-v8a"
+          if [ "${{ matrix.abi }}" = "x86_64" ]; then
+            android_abi="x86_64"
           fi
-          ls -l stage
+
+          # Extract stripped libconcat_android.so, libc++_shared.so (and libonnxruntime.so on x86_64)
+          rm -rf android-playstore/app/src/main/jniLibs
+          mkdir -p "android-playstore/app/src/main/jniLibs/$android_abi"
+          unzip -qo -j "$apk" "lib/$android_abi/*.so" -d "android-playstore/app/src/main/jniLibs/$android_abi"
+          ls -lh "android-playstore/app/src/main/jniLibs/$android_abi"
+
+          # Configure release signing for Gradle (uses repo secret if set, else the run keystore)
+          if [ -n "$KEYSTORE_B64" ]; then
+            ks="$RUNNER_TEMP/playstore-release.keystore"
+            echo "$KEYSTORE_B64" | base64 --decode > "$ks"
+            alias="$KEY_ALIAS"
+            if [ -z "$alias" ]; then
+              alias=$(keytool -list -keystore "$ks" -storepass:env KEYSTORE_PASSWORD 2>/dev/null \
+                | awk -F, '/PrivateKeyEntry/ { print $1; exit }')
+            fi
+            export ANDROID_KEYSTORE_PATH="$ks"
+            export ANDROID_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
+            export ANDROID_KEY_ALIAS="$alias"
+            export ANDROID_KEY_PASSWORD="$KEY_PASSWORD"
+          else
+            export ANDROID_KEYSTORE_PATH="$CARGO_APK_RELEASE_KEYSTORE"
+            export ANDROID_KEYSTORE_PASSWORD="$CARGO_APK_RELEASE_KEYSTORE_PASSWORD"
+            export ANDROID_KEY_ALIAS="concat"
+            export ANDROID_KEY_PASSWORD="$CARGO_APK_RELEASE_KEYSTORE_PASSWORD"
+          fi
+
+          IFS='.' read -r maj min pat <<< "${VERSION%%-*}"
+          vcode=$((maj * 1000000 + min * 1000 + pat))
+
+          (
+            cd android-playstore
+            chmod +x gradlew
+            ./gradlew --no-daemon \
+              -Pabi="$android_abi" \
+              -PversionName="$VERSION" \
+              -PversionCode="$vcode" \
+              :app:bundleRelease :app:assembleRelease
+          )
+
+          cp android-playstore/app/build/outputs/apk/release/app-release.apk \
+            "stage/VideoEditor-$VERSION-android-${{ matrix.abi }}.apk"
+          if [ "${{ matrix.ship }}" = "true" ]; then
+            cp android-playstore/app/build/outputs/bundle/release/app-release.aab \
+              "stage/VideoEditor-$VERSION-android-${{ matrix.abi }}.aab"
+          fi
+          rm -f "$RUNNER_TEMP/playstore-release.keystore"
+          ls -lh stage
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
